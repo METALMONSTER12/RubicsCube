@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NxN Rubik's Cube Simulation</title>
+    <style>
+        /* ... (CSS remains the same) ... */
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background: radial-gradient(ellipse at center, #e0e0e0 0%, #c0c0c0 100%); display: flex; flex-direction: column; height: 100vh; }
+        #controls { padding: 10px; background-color: rgba(221, 221, 221, 0.9); border-bottom: 1px solid #bbb; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; z-index: 10; position: relative; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        #controls label, #controls input, #controls button { padding: 5px; border-radius: 3px; }
+        #controls input[type="number"] { width: 60px; border: 1px solid #bbb; }
+        #controls button { background-color: #007bff; color: white; border: none; cursor: pointer; transition: background-color 0.2s; }
+        #controls button:hover:not(:disabled) { background-color: #0056b3; }
+        #controls button:disabled { background-color: #aaa; cursor: not-allowed; }
+        #status { margin-left: auto; font-weight: bold; padding-right: 15px; color: #333; }
+        #container { flex-grow: 1; position: relative; top: 0; left: 0; width: 100%; }
+        canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    </style>
+    <!-- Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    <!-- HTML Structure -->
+    <div id="controls">
+        <label for="cube-size">Size (N):</label>
+        <input type="number" id="cube-size" value="3" min="2" max="50">
+        <button id="create-btn">Create Cube</button>
+        <label for="scramble-moves">Scramble Moves:</label>
+        <input type="number" id="scramble-moves" value="20" min="1" max="100">
+        <button id="scramble-btn" disabled>Scramble</button>
+        <button id="solve-btn" disabled>Solve</button>
+        <label for="anim-speed">Speed (ms/move):</label>
+        <input type="number" id="anim-speed" value="300" min="50" max="2000" step="50">
+        <div id="status">Status: Loading...</div>
+    </div>
+    <div id="container"></div>
+
+    <!-- Main Script -->
+    <script>
+        // --- Configuration & Globals (Unchanged) ---
+        const COLORS = { R: 0xB71C1C, L: 0xFF6F00, U: 0xFFFFFF, D: 0xFFD600, F: 0x0D47A1, B: 0x2E7D32, INTERNAL: 0x1a1a1a };
+        const AXES = { X: 'x', Y: 'y', Z: 'z' };
+        const DIRECTIONS = { CW: 1, CCW: -1 };
+        let scene, camera, renderer, controls;
+        let cubeGroup, groundPlane, directionalLight;
+        let cubies = [];
+        let cubeSize = 3; let cubieSize = 1; let gap = 0.15;
+        let isAnimating = false; let moveQueue = []; let scrambleSequence = [];
+        let animationSpeed = 300;
+        let container, createBtn, scrambleBtn, solveBtn, sizeInput, scrambleMovesInput, animSpeedInput, statusDiv;
+
+        // --- Initialization ---
+        function init() {
+            console.log("init() called");
+            container = document.getElementById('container'); createBtn = document.getElementById('create-btn'); scrambleBtn = document.getElementById('scramble-btn'); solveBtn = document.getElementById('solve-btn'); sizeInput = document.getElementById('cube-size'); scrambleMovesInput = document.getElementById('scramble-moves'); animSpeedInput = document.getElementById('anim-speed'); statusDiv = document.getElementById('status');
+            if (!container) { console.error("FATAL: #container not found."); return; }
+            updateStatus("Initializing 3D scene..."); setButtonsDisabled(true);
+            try {
+                if (typeof THREE === 'undefined') { console.error("FATAL: THREE core library not found."); alert("Critical Error: Three.js failed to load."); return; }
+                scene = new THREE.Scene();
+                const aspect = container.clientWidth / container.clientHeight; camera = new THREE.PerspectiveCamera(60, aspect > 0 ? aspect : 1, 0.1, 2000); camera.position.set(5, 5, 10); camera.lookAt(0, 0, 0);
+                renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); renderer.setPixelRatio(window.devicePixelRatio); renderer.setSize(container.clientWidth > 0 ? container.clientWidth : 300, container.clientHeight > 0 ? container.clientHeight : 150);
+                // Keep shadow map enabled in renderer/light in case other objects need it
+                renderer.shadowMap.enabled = true;
+                renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                container.appendChild(renderer.domElement);
+                console.log("Renderer created:", renderer.domElement);
+                if (typeof THREE.OrbitControls === 'function') { if (renderer.domElement && renderer.domElement.tagName === 'CANVAS') { controls = new THREE.OrbitControls(camera, renderer.domElement); controls.enableDamping = true; controls.dampingFactor = 0.1; controls.screenSpacePanning = false; controls.minPolarAngle = 0; controls.maxPolarAngle = Math.PI; controls.maxDistance = 500; console.log("OrbitControls initialized:", controls); } else { console.error("OrbitControls Init Error: renderer.domElement invalid.", renderer.domElement); } } else { console.error("OrbitControls Load Error: THREE.OrbitControls is not defined."); alert("Warning: OrbitControls.js failed to load. Camera movement disabled."); }
+                const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8); scene.add(hemisphereLight);
+                directionalLight = new THREE.DirectionalLight(0xffffff, 0.9); directionalLight.position.set(8, 15, 10);
+                directionalLight.castShadow = true; // Light still casts shadows (for potential other objects)
+                directionalLight.shadow.mapSize.width = 2048; directionalLight.shadow.mapSize.height = 2048; directionalLight.shadow.camera.near = 0.5; directionalLight.shadow.camera.far = 50; const initialShadowSize = 10; directionalLight.shadow.camera.left = -initialShadowSize; directionalLight.shadow.camera.right = initialShadowSize; directionalLight.shadow.camera.top = initialShadowSize; directionalLight.shadow.camera.bottom = -initialShadowSize; scene.add(directionalLight); console.log("Lights added");
+                cubeGroup = new THREE.Group(); scene.add(cubeGroup); console.log("Cube group added");
+
+                // --- Ground Plane Setup (Modified) ---
+                 const planeSize = 150;
+                 const planeGeometry = new THREE.CircleGeometry(planeSize, 64);
+                 // ** Changed to standard material **
+                 const planeMaterial = new THREE.MeshStandardMaterial({
+                     color: 0xcccccc, // Light grey
+                     roughness: 0.9,
+                     metalness: 0.1
+                 });
+                 groundPlane = new THREE.Mesh(planeGeometry, planeMaterial);
+                 // ** Explicitly disable receiving shadows **
+                 groundPlane.receiveShadow = false;
+                 groundPlane.rotation.x = -Math.PI / 2;
+                 groundPlane.position.y = -5;
+                 scene.add(groundPlane);
+                 console.log("Ground plane added (not receiving shadows)");
+                // --- End Ground Plane Setup ---
+
+                window.addEventListener('resize', onWindowResize, false); if (createBtn) createBtn.addEventListener('click', handleCreateCube); if (scrambleBtn) scrambleBtn.addEventListener('click', handleScramble); if (solveBtn) solveBtn.addEventListener('click', handleSolve); if (animSpeedInput) { animSpeedInput.addEventListener('input', (e) => animationSpeed = parseInt(e.target.value)); animSpeedInput.value = animationSpeed; } console.log("Event listeners attached");
+                try { console.log("Attempting initial cube creation..."); updateStatus("Creating initial cube..."); const initialSize = sizeInput ? parseInt(sizeInput.value) : 3; createCube(initialSize); } catch (cubeError) { console.error("Error during initial createCube call:", cubeError); updateStatus("ERROR creating initial cube!"); setButtonsDisabled(true); throw cubeError; }
+                onWindowResize(); console.log("Initialization successful. Starting animation loop."); animate();
+            } catch (error) { console.error("FATAL Error during Three.js initialization:", error); updateStatus("Initialization Error!"); container.innerHTML = `<div style="padding: 20px; color: red; background: white; border: 1px solid red;"><h2>Initialization Error</h2><p>Could not set up the 3D simulation.</p><p><b>Error:</b> ${error.message}</p><p>Please check the browser console (F12) for more details.</p></div>`; setButtonsDisabled(true); }
+        }
+
+        // --- Cube Creation (Unchanged) ---
+        function createCube(N) { /* ... same as previous ... */
+             if (isAnimating) { console.warn("createCube called while animating."); return; } console.log("createCube called with N =", N); if (N > 15) { console.warn(`Creating large ${N}x${N}x${N} cube...`); updateStatus(`Creating ${N}x${N}x${N} (Warning: Large size!)...`); } else { updateStatus(`Creating ${N}x${N}x${N} cube...`); } setButtonsDisabled(true); isAnimating = false; moveQueue = []; scrambleSequence = [];
+             try {
+                 if (cubeGroup) { while (cubeGroup.children.length > 0) { const obj = cubeGroup.children[0]; cubeGroup.remove(obj); if (obj.geometry) obj.geometry.dispose(); if (obj.material) { if (Array.isArray(obj.material)) { obj.material.forEach(m => { if (m.dispose) m.dispose(); });} else if (obj.material.dispose) { obj.material.dispose();} } } } else { cubeGroup = new THREE.Group(); scene.add(cubeGroup); }
+                 cubies = []; cubeSize = N; if(sizeInput) sizeInput.value = cubeSize; const totalSize = N * cubieSize + (N - 1) * gap; const offset = (totalSize - cubieSize) / 2; let createdCount = 0; for (let i = 0; i < N; i++) { for (let j = 0; j < N; j++) { for (let k = 0; k < N; k++) { if (N > 2 && i > 0 && i < N - 1 && j > 0 && j < N - 1 && k > 0 && k < N - 1) continue; const cubie = createCubie(i, j, k, N, offset); cubies.push(cubie); cubeGroup.add(cubie); createdCount++; }}} console.log("Created", createdCount, "cubies"); if (groundPlane) { groundPlane.position.y = -offset - cubieSize / 2 - 1; }
+                 const camDist = N * 1.8; const camHeight = N * 1.5; camera.position.set(camDist, camHeight, camDist * 1.3); camera.lookAt(0, 0, 0); if (controls) { controls.target.set(0, 0, 0); controls.update(); console.log("OrbitControls target set"); } else { camera.lookAt(scene.position); }
+                 if (directionalLight && directionalLight.castShadow && directionalLight.shadow.camera) { const requiredShadowSize = totalSize * 0.7 + 5; directionalLight.shadow.camera.left = -requiredShadowSize; directionalLight.shadow.camera.right = requiredShadowSize; directionalLight.shadow.camera.top = requiredShadowSize; directionalLight.shadow.camera.bottom = -requiredShadowSize; directionalLight.shadow.camera.far = Math.max(50, N * 3 + 20); directionalLight.shadow.camera.updateProjectionMatrix(); }
+                 updateStatus(`Ready (${N}x${N}x${N})`); setButtonsDisabled(false); if(solveBtn) solveBtn.disabled = true; console.log("Cube creation complete.");
+             } catch (error) { console.error("Error *during* cube creation:", error); updateStatus(`ERROR creating ${N}x${N} cube!`); setButtonsDisabled(true); if(container) container.innerHTML = `<p style="color:red;">Error creating cube: ${error.message}. See console.</p>`; }
+        }
+
+        // --- createCubie (MODIFIED) ---
+        function createCubie(i, j, k, N, offset) {
+            const geometry = new THREE.BoxGeometry(cubieSize, cubieSize, cubieSize);
+            const materials = [];
+            const faceColors = [ (i === N - 1) ? COLORS.R : COLORS.INTERNAL, (i === 0) ? COLORS.L : COLORS.INTERNAL, (j === N - 1) ? COLORS.U : COLORS.INTERNAL, (j === 0) ? COLORS.D : COLORS.INTERNAL, (k === N - 1) ? COLORS.F : COLORS.INTERNAL, (k === 0) ? COLORS.B : COLORS.INTERNAL ];
+            for (const colorValue of faceColors) {
+                const isInternal = (colorValue === COLORS.INTERNAL);
+                materials.push(new THREE.MeshStandardMaterial({
+                    color: colorValue,
+                    roughness: isInternal ? 0.8 : 0.5,
+                    metalness: isInternal ? 0.1 : 0.0
+                }));
+            }
+            const mesh = new THREE.Mesh(geometry, materials);
+            mesh.position.set((i * (cubieSize + gap)) - offset, (j * (cubieSize + gap)) - offset, (k * (cubieSize + gap)) - offset);
+            mesh.userData = { initialI: i, initialJ: j, initialK: k, i, j, k };
+
+            // *** Cubies no longer cast shadows ***
+            mesh.castShadow = false;
+            // mesh.receiveShadow = false; // Optional: prevent self-shadowing artifacts if needed
+
+            return mesh;
+        }
+
+        // --- Move Logic & Animation (Unchanged) ---
+        function queueMove(axis, layer, direction) { /* ... */ moveQueue.push({ axis, layer, direction }); if (!isAnimating) { processMoveQueue(); } }
+        function processMoveQueue() { /* ... */ if (isAnimating || moveQueue.length === 0) { return; } isAnimating = true; setButtonsDisabled(true); const move = moveQueue.shift(); animateMove(move.axis, move.layer, move.direction, animationSpeed); }
+        function animateMove(axis, layer, direction, duration) { /* ... */ const pivot = new THREE.Group(); scene.add(pivot); const cubiesToRotate = getCubiesInLayer(axis, layer); if (cubiesToRotate.length === 0) { /* ... Skip ... */ console.warn(`No cubies for move: ${axis}, L${layer}. Skip.`); scene.remove(pivot); isAnimating = false; if (moveQueue.length === 0) { setButtonsDisabled(false); if(solveBtn) solveBtn.disabled = (scrambleSequence.length === 0); updateStatus(`Idle (${cubeSize}x${cubeSize}x${cubeSize})`); } else { processMoveQueue(); } return; } cubiesToRotate.forEach(cubie => { pivot.attach(cubie); }); const targetRotation = {}; targetRotation[axis] = (Math.PI / 2) * direction; const startRotation = { angle: 0 }; const endRotation = { angle: targetRotation[axis] }; const tween = new TWEEN.Tween(startRotation).to(endRotation, duration).easing(TWEEN.Easing.Quadratic.InOut).onUpdate(() => { pivot.rotation[axis] = startRotation.angle; }).onComplete(() => { pivot.updateMatrixWorld(true); cubiesToRotate.forEach(cubie => { cubeGroup.attach(cubie); }); scene.remove(pivot); updateLogicalState(axis, direction, cubiesToRotate); isAnimating = false; if (moveQueue.length === 0) { setButtonsDisabled(false); if(solveBtn) solveBtn.disabled = (scrambleSequence.length === 0); updateStatus(`Idle (${cubeSize}x${cubeSize}x${cubeSize})`); } else { processMoveQueue(); } }).start(); }
+        function getCubiesInLayer(axis, layer) { /* ... */ const result = []; const centerOffset = (cubeSize - 1) / 2.0; const layerCoord = (layer * (cubieSize + gap)) - (centerOffset * (cubieSize + gap)); const tolerance = (cubieSize + gap) * 0.5; cubies.forEach(cubie => { const worldPos = new THREE.Vector3(); cubie.getWorldPosition(worldPos); let coord; switch (axis) { case AXES.X: coord = worldPos.x; break; case AXES.Y: coord = worldPos.y; break; case AXES.Z: coord = worldPos.z; break;} if (Math.abs(coord - layerCoord) < tolerance) { result.push(cubie); } }); return result; }
+        function updateLogicalState(axis, direction, rotatedCubies) { /* ... */ const N = cubeSize; const center = (N - 1) / 2.0; rotatedCubies.forEach(cubie => { const ud = cubie.userData; const i = ud.i; const j = ud.j; const k = ud.k; let newI = i; let newJ = j; let newK = k; const relI = i - center; const relJ = j - center; const relK = k - center; let newRelI = relI; let newRelJ = relJ; let newRelK = relK; const cos = 0; const sin = direction; if (axis === AXES.X) { newRelJ = -relK * sin; newRelK = relJ * sin; } else if (axis === AXES.Y) { newRelI = relK * sin; newRelK = -relI * sin; } else if (axis === AXES.Z) { newRelI = -relJ * sin; newRelJ = relI * sin; } newI = Math.round(newRelI + center); newJ = Math.round(newRelJ + center); newK = Math.round(newRelK + center); ud.i = newI; ud.j = newJ; ud.k = newK; }); }
+
+        // --- Scramble & Solve (Unchanged) ---
+        function scramble(numMoves) { /* ... */ if (isAnimating) return; updateStatus(`Scrambling (${numMoves} moves)...`); scrambleSequence = []; if(solveBtn) solveBtn.disabled = true; const axes = [AXES.X, AXES.Y, AXES.Z]; let lastAxis = null; for (let i = 0; i < numMoves; i++) { let axis, layer, direction; do { axis = axes[Math.floor(Math.random() * axes.length)]; } while (axis === lastAxis); lastAxis = axis; layer = Math.floor(Math.random() * cubeSize); direction = Math.random() < 0.5 ? DIRECTIONS.CW : DIRECTIONS.CCW; const move = { axis, layer, direction }; scrambleSequence.push(move); queueMove(axis, layer, direction); } }
+        function solve() { /* ... */ if (isAnimating || scrambleSequence.length === 0) { console.log("Solve condition not met:", isAnimating, scrambleSequence.length); return; } updateStatus(`Solving (${scrambleSequence.length} moves)...`); const solveSequence = scrambleSequence.slice().reverse().map(move => ({ axis: move.axis, layer: move.layer, direction: -move.direction })); console.log("Solve Sequence:", JSON.stringify(solveSequence)); scrambleSequence = []; if(solveBtn) solveBtn.disabled = true; solveSequence.forEach(move => { queueMove(move.axis, move.layer, move.direction); }); console.log("Solve moves queued:", moveQueue.length); }
+
+        // --- Utility Functions ---
+        function setButtonsDisabled(isDisabled) { /* ... */ console.log("Setting buttons disabled state:", isDisabled); if (createBtn) createBtn.disabled = isDisabled; else console.warn("createBtn not found"); if (scrambleBtn) scrambleBtn.disabled = isDisabled; else console.warn("scrambleBtn not found"); if (solveBtn) solveBtn.disabled = isDisabled; else console.warn("solveBtn not found"); }
+
+        // --- Event Handlers (Unchanged) ---
+        function handleCreateCube() { /* ... */ console.log("handleCreateCube called"); if (isAnimating) return; if (!sizeInput) return; const newSize = parseInt(sizeInput.value); if (newSize >= 2 && newSize <= 50) { createCube(newSize); } else { alert("Size must be 2-50."); sizeInput.value = cubeSize; } }
+        function handleScramble() { /* ... */ console.log("handleScramble called"); if (isAnimating) return; if (!scrambleMovesInput) return; const numMoves = parseInt(scrambleMovesInput.value); if (numMoves > 0 && numMoves <= 100) { scramble(numMoves); } else { alert("Scramble moves must be 1-100."); scrambleMovesInput.value = 20;} }
+        function handleSolve() { /* ... */ console.log("handleSolve called"); if (isAnimating) return; solve(); }
+        function onWindowResize() { /* ... */ if (!camera || !renderer || !container) return; const width = container.clientWidth; const height = container.clientHeight; if (width > 0 && height > 0) { camera.aspect = width / height; camera.updateProjectionMatrix(); renderer.setSize(width, height); } else { console.warn("Container zero size during resize."); } }
+        function updateStatus(message) { /* ... */ if (!statusDiv) return; statusDiv.textContent = `Status: ${message}`; }
+
+        // --- Animation Loop (Unchanged) ---
+        function animate(time) { /* ... */ requestAnimationFrame(animate); try { TWEEN.update(time); if (controls) controls.update(); if (renderer && scene && camera) { renderer.render(scene, camera); } } catch (animError) { console.error("Error in animation loop:", animError); } }
+
+        // --- Start ---
+        document.addEventListener('DOMContentLoaded', (event) => { console.log("DOM loaded. Running init()."); init(); });
+
+    </script>
+</body>
+</html>
